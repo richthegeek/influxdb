@@ -41,6 +41,7 @@ func init() {
 	registeredAggregators["median"] = NewMedianAggregator
 	registeredAggregators["mean"] = NewMeanAggregator
 	registeredAggregators["mode"] = NewModeAggregator
+	registeredAggregators["top"] = NewTopAggregator
 	registeredAggregators["distinct"] = NewDistinctAggregator
 	registeredAggregators["first"] = NewFirstAggregator
 	registeredAggregators["last"] = NewLastAggregator
@@ -837,7 +838,6 @@ type ModeAggregator struct {
 	AbstractAggregator
 	defaultValue *protocol.FieldValue
 	alias        string
-	size         int
 }
 
 func (self *ModeAggregator) AggregatePoint(state interface{}, p *protocol.Point) (interface{}, error) {
@@ -877,6 +877,105 @@ func (self *ModeAggregator) ColumnNames() []string {
 
 func (self *ModeAggregator) GetValues(state interface{}) [][]*protocol.FieldValue {
 	s := state.(*ModeAggregatorState)
+
+	maxCount := 0
+	countMap := make(map[int][]interface{}, len(s.counts))
+	for value, count := range s.counts {
+		countMap[count] = append(countMap[count], value)
+		if count > maxCount {
+			maxCount = count
+		}
+	}
+
+	returnValues := [][]*protocol.FieldValue{}
+	for _, value := range countMap[maxCount] {
+		switch v := value.(type) {
+			case int:
+				n := int64(v)
+				returnValues = append(returnValues, []*protocol.FieldValue{&protocol.FieldValue{Int64Value: &n}})
+			case string:
+				returnValues = append(returnValues, []*protocol.FieldValue{&protocol.FieldValue{StringValue: &v}})
+			case bool:
+				returnValues = append(returnValues, []*protocol.FieldValue{&protocol.FieldValue{BoolValue: &v}})
+			case float64:
+				returnValues = append(returnValues, []*protocol.FieldValue{&protocol.FieldValue{DoubleValue: &v}})
+		}
+	}
+
+	return returnValues
+}
+
+func NewModeAggregator(_ *parser.SelectQuery, value *parser.Value, defaultValue *parser.Value) (Aggregator, error) {
+	if len(value.Elems) != 1 {
+		return nil, common.NewQueryError(common.WrongNumberOfArguments, "function mode() requires only one argument")
+	}
+
+	wrappedDefaultValue, err := wrapDefaultValue(defaultValue)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ModeAggregator{
+		AbstractAggregator: AbstractAggregator{
+			value: value.Elems[0],
+		},
+		defaultValue: wrappedDefaultValue,
+		alias:        value.Alias,
+	}, nil
+}
+
+//
+// Top Aggregator
+//
+
+type TopAggregatorState struct {
+	counts map[interface{}]int
+}
+
+type TopAggregator struct {
+	AbstractAggregator
+	defaultValue *protocol.FieldValue
+	alias        string
+	size         int
+}
+
+func (self *TopAggregator) AggregatePoint(state interface{}, p *protocol.Point) (interface{}, error) {
+	s, ok := state.(*TopAggregatorState)
+	if !ok {
+		s = &TopAggregatorState{make(map[interface{}]int)}
+	}
+
+	point, err := GetValue(self.value, self.columns, p)
+	if err != nil {
+		return nil, err
+	}
+
+	var value interface{}
+	if point.Int64Value != nil {
+		value = float64(*point.Int64Value)
+	} else if point.DoubleValue != nil {
+		value = *point.DoubleValue
+	} else if point.BoolValue != nil {
+		value = *point.BoolValue
+	} else if point.StringValue != nil {
+		value = *point.StringValue
+	} else {
+		value = nil
+	}
+
+	s.counts[value]++
+	return s, nil
+}
+
+func (self *TopAggregator) ColumnNames() []string {
+	if self.alias != "" {
+		return []string{self.alias}
+	}
+	return []string{"mode"}
+}
+
+func (self *TopAggregator) GetValues(state interface{}) [][]*protocol.FieldValue {
+	s := state.(*TopAggregatorState)
 
 	counts := make([]int, len(s.counts))
 	countMap := make(map[int][]interface{}, len(s.counts))
@@ -918,9 +1017,9 @@ func (self *ModeAggregator) GetValues(state interface{}) [][]*protocol.FieldValu
 	return returnValues
 }
 
-func NewModeAggregator(_ *parser.SelectQuery, value *parser.Value, defaultValue *parser.Value) (Aggregator, error) {
-	if len(value.Elems) < 1 {
-		return nil, common.NewQueryError(common.WrongNumberOfArguments, "function mode() requires at least one argument")
+func NewTopAggregator(_ *parser.SelectQuery, value *parser.Value, defaultValue *parser.Value) (Aggregator, error) {
+	if len(value.Elems) == 0 {
+		return nil, common.NewQueryError(common.WrongNumberOfArguments, "function top() requires at least one argument")
 	}
 
 	if len(value.Elems) > 2 {
@@ -949,7 +1048,7 @@ func NewModeAggregator(_ *parser.SelectQuery, value *parser.Value, defaultValue 
 		return nil, err
 	}
 
-	return &ModeAggregator{
+	return &TopAggregator{
 		AbstractAggregator: AbstractAggregator{
 			value: value.Elems[0],
 		},
